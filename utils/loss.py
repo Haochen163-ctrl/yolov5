@@ -130,13 +130,14 @@ class ComputeLoss:
         self.nl = m.nl  # number of layers
         self.anchors = m.anchors
         self.device = device
+        self.srla_counts = torch.zeros((2, self.nl), device=device, dtype=torch.long)
 
-    def __call__(self, p, targets):  # predictions, targets
+    def __call__(self, p, targets, retention=None):  # predictions, targets
         """Performs forward pass, calculating class, box, and object loss for given predictions and targets."""
         lcls = torch.zeros(1, device=self.device)  # class loss
         lbox = torch.zeros(1, device=self.device)  # box loss
         lobj = torch.zeros(1, device=self.device)  # object loss
-        tcls, tbox, indices, anchors = self.build_targets(p, targets)  # targets
+        tcls, tbox, indices, anchors = self.build_targets(p, targets, retention)  # targets
 
         # Losses
         for i, pi in enumerate(p):  # layer index, layer predictions
@@ -182,7 +183,7 @@ class ComputeLoss:
 
         return (lbox + lobj + lcls) * bs, torch.cat((lbox, lobj, lcls)).detach()
 
-    def build_targets(self, p, targets):
+    def build_targets(self, p, targets, retention=None):
         """Prepares model targets from input targets (image,class,x,y,w,h) for loss computation, returning class, box,
         indices, and anchors.
         """
@@ -191,6 +192,25 @@ class ComputeLoss:
         gain = torch.ones(7, device=self.device)  # normalized to gridspace gain
         ai = torch.arange(na, device=self.device).float().view(na, 1).repeat(1, nt)  # same as .repeat_interleave(nt)
         targets = torch.cat((targets.repeat(na, 1, 1), ai[..., None]), 2)  # append anchor indices
+
+        if retention is not None:
+            if retention.shape != (nt, self.nl):
+                raise ValueError("SRLA retention must have shape (num_targets, num_detection_layers)")
+            matches = []
+            for i in range(self.nl):
+                shape = p[i].shape
+                wh = targets[..., 4:6] * targets.new_tensor([shape[3], shape[2]])
+                ratio = wh / self.anchors[i][:, None]
+                matches.append(torch.max(ratio, 1 / ratio).max(2)[0] < self.hyp["anchor_t"])
+            available = torch.stack([match.any(0) for match in matches], 1)
+            levels = retention > self.hyp["srla_thr"]
+            missing = ~(available & levels).any(1) & available.any(1)
+            best = retention.masked_fill(~available, -1).argmax(1)
+            levels[missing, best[missing]] = True
+            for i in range(self.nl):
+                self.srla_counts[0, i] += matches[i].sum()
+                matches[i] = matches[i] & levels[:, i]
+                self.srla_counts[1, i] += matches[i].sum()
 
         g = 0.5  # bias
         off = (
@@ -216,8 +236,11 @@ class ComputeLoss:
             t = targets * gain  # shape(3,n,7)
             if nt:
                 # Matches
-                r = t[..., 4:6] / anchors[:, None]  # wh ratio
-                j = torch.max(r, 1 / r).max(2)[0] < self.hyp["anchor_t"]  # compare
+                if retention is None:
+                    r = t[..., 4:6] / anchors[:, None]  # wh ratio
+                    j = torch.max(r, 1 / r).max(2)[0] < self.hyp["anchor_t"]
+                else:
+                    j = matches[i]
                 t = t[j]  # filter
 
                 # Offsets
