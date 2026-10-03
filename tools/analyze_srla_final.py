@@ -31,13 +31,12 @@ def main():
     parser.add_argument("--experiment-root", type=Path, required=True)
     parser.add_argument("--inference", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--control-summary", type=Path, help="Frozen three-seed Control summary.json")
+    parser.add_argument("--control-summary", type=Path, required=True, help="Frozen three-seed Control summary.json")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=False)
     fast = args.experiment_root / "YOLOv5-srla-fast/runs/srla-fast"
     frozen = fast / "freeze/srla-hard-3seed-final"
     soft = args.experiment_root / "YOLOv5-srla-soft/runs/srla-soft"
-    control = args.experiment_root / "YOLOv5-matched-control/runs/matched-gating/freeze/matched-control-seed0-final"
     inputs = []
 
     def results(path):
@@ -87,18 +86,7 @@ def main():
             }
         )
     write_csv(args.out / "main_summary.csv", summary)
-    ablation = [
-        {"method": r["method"], "map5095": r["map5095"], "best_epoch": r["best_epoch"]} for r in rows if r["seed"] == 0
-    ]
-    for method, path in [
-        ("Matched Random", control / "formal100_seed0/control/results.csv"),
-        ("Soft-SRLA", soft / "formal100_seed0/soft/results.csv"),
-    ]:
-        r = results(path)
-        ablation.append({"method": method, "map5095": r["map5095"], "best_epoch": r["best_epoch"]})
-    order = ["Baseline", "Matched Random", "Hard-SRLA", "Soft-SRLA"]
-    ablation.sort(key=lambda r: order.index(r["method"]))
-    write_csv(args.out / "ablations.csv", ablation)
+    soft_result = results(soft / "formal100_seed0/soft/results.csv")
     path = fast / "formal100/postrun_analysis/epoch_assignment_candidates.csv"
     inputs.append(path)
     raw = read_csv(path)
@@ -194,115 +182,133 @@ def main():
     axes[0].legend()
     fig.suptitle("Original-pixel sizes; mean +/- sample SD, 3 seeds")
     save(fig, "mechanism_sizes")
-    fig, ax = plt.subplots(figsize=(7, 4))
-    values = [r["map5095"] for r in ablation[:3]]
-    ax.bar(x, values, color=["#3274A1", "#999999", "#E1812C"])
-    for i, v in enumerate(values):
-        ax.text(i, v + 0.15, f"{v:.3f}", ha="center")
-    ax.set(
-        xticks=x,
-        xticklabels=order[:3],
-        ylabel="mAP50:95 (%)",
-        ylim=(0, 13),
-        title="Seed0: matched sparsity, different selection",
+    inputs.append(args.control_summary)
+    control_rows = json.loads(args.control_summary.read_text())["rows"]
+    methods = ["Baseline", "Matched Random", "Hard-SRLA"]
+    assert len(control_rows) == 9
+    assert {(r["seed"], r["method"]) for r in control_rows} == {(s, m) for s in range(3) for m in methods}
+    values = np.array(
+        [
+            [next(r["map5095"] for r in control_rows if r["seed"] == s and r["method"] == m) for s in range(3)]
+            for m in methods
+        ]
     )
-    save(fig, "mechanism_control")
-
-    control_lines = []
-    if args.control_summary:
-        inputs.append(args.control_summary)
-        control_rows = json.loads(args.control_summary.read_text())["rows"]
-        methods = ["Baseline", "Matched Random", "Hard-SRLA"]
-        assert len(control_rows) == 9
-        assert {(r["seed"], r["method"]) for r in control_rows} == {(s, m) for s in range(3) for m in methods}
-        values = np.array(
-            [
-                [next(r["map5095"] for r in control_rows if r["seed"] == s and r["method"] == m) for s in range(3)]
-                for m in methods
-            ]
-        )
-        assert np.isfinite(values).all()
-        means, sd = values.mean(1), values.std(1, ddof=1)
-        colors = ["#3274A1", "#858B92", "#D97422"]
-        write_csv(args.out / "three_seed_control.csv", control_rows)
-        fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.8))
-        for i, color in enumerate(colors):
-            axes[0].errorbar(i, means[i], yerr=sd[i], fmt="D", color=color, markersize=8, capsize=6, linewidth=2)
-            axes[0].scatter(i + np.array([-0.09, 0, 0.09]), values[i], color=color, s=30, alpha=0.6)
-            axes[0].text(i, means[i] + sd[i] + 0.09, f"{means[i]:.3f} +/- {sd[i]:.3f}", ha="center", fontsize=10)
-            axes[1].plot(x, values[i], "o-", color=color, linewidth=2.2, markersize=7, label=methods[i])
-            for seed, value in enumerate(values[i]):
-                axes[1].annotate(
-                    f"{value:.3f}",
-                    (seed, value),
-                    xytext=(0, 8 if i else -16),
-                    textcoords="offset points",
-                    ha="center",
-                    fontsize=10,
-                    color=color,
-                )
-        axes[0].set(
-            xticks=x,
-            xticklabels=methods,
-            xlim=(-0.5, 2.5),
-            ylabel="mAP50:95 (%)",
-            title="Mean +/- sample SD; dots = individual seeds",
-        )
-        axes[1].set(xticks=x, xticklabels=["seed0", "seed1", "seed2"], xlim=(-0.2, 2.2), title="Same-seed comparisons")
-        axes[1].legend(loc="lower left", ncol=3, fontsize=9, frameon=False)
-        for ax in axes:
-            ax.set_ylim(10.35, 11.9)
-            ax.grid(axis="y", alpha=0.2)
-            ax.set_axisbelow(True)
-        fig.suptitle("Hard-SRLA exceeds matched random gating in all three seeds", fontsize=15)
-        fig.supxlabel(
-            "Detail view: y-axis starts at 10.35%. Validation subset; fixed best-epoch selection.", fontsize=10
-        )
-        save(fig, "control_three_seeds")
-        contrasts = np.array([values[1] - values[0], values[2] - values[1], values[2] - values[0]])
-        gain, spread = contrasts.mean(1), contrasts.std(1, ddof=1)
-        fig, ax = plt.subplots(figsize=(8, 4.8))
-        for i, color in enumerate(["#858B92", "#D97422", "#3274A1"]):
-            ax.bar(i, gain[i], color=color, alpha=0.8, width=0.6)
-            ax.errorbar(i, gain[i], yerr=spread[i], fmt="none", color="#263238", capsize=6, linewidth=1.5)
-            ax.scatter(i + np.array([-0.13, 0, 0.13]), contrasts[i], color="#263238", s=28, zorder=4)
-            ax.text(
-                i,
-                max(gain[i] + spread[i], max(contrasts[i])) + 0.05,
-                f"+{gain[i]:.3f} +/- {spread[i]:.3f}",
-                ha="center",
-                fontsize=11,
-                fontweight="bold",
+    assert np.isfinite(values).all()
+    # Recompute all Control epochs from frozen CSVs and verify the summary used for plotting.
+    for r in control_rows:
+        if r["method"] == "Matched Random":
+            seed = r["seed"]
+            folder = (
+                args.experiment_root / "YOLOv5-matched-control/runs/matched-gating/freeze/matched-control-seed0-final"
+                if seed == 0
+                else args.control_summary.parent.parent
             )
-        ax.set(
-            xticks=x,
-            xticklabels=["Random - Baseline", "Hard - Random", "Hard - Baseline"],
-            ylabel="Paired improvement (percentage points)",
-            ylim=(0, 1.03),
-            title=f"Additional benefit of spectral selection: +{gain[1]:.3f} +/- {spread[1]:.3f} pp",
-        )
+            actual = results(folder / f"formal100_seed{seed}/control/results.csv")
+        else:
+            actual = next(v for v in rows if v["seed"] == r["seed"] and v["method"] == r["method"])
+        for metric in ["best_epoch", "map50", "map5095", "last_map5095"]:
+            assert abs(actual[metric] - r[metric]) < 1e-9, (r["seed"], r["method"], metric)
+
+    means, sd = values.mean(1), values.std(1, ddof=1)
+    colors = ["#3274A1", "#858B92", "#D97422"]
+    write_csv(args.out / "three_seed_control.csv", control_rows)
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.8))
+    for i, color in enumerate(colors):
+        axes[0].errorbar(i, means[i], yerr=sd[i], fmt="D", color=color, markersize=8, capsize=6, linewidth=2)
+        axes[0].scatter(i + np.array([-0.09, 0, 0.09]), values[i], color=color, s=30, alpha=0.6)
+        axes[0].text(i, means[i] + sd[i] + 0.09, f"{means[i]:.3f} +/- {sd[i]:.3f}", ha="center", fontsize=10)
+        axes[1].plot(x, values[i], "o-", color=color, linewidth=2.2, markersize=7, label=methods[i])
+        for seed, value in enumerate(values[i]):
+            axes[1].annotate(
+                f"{value:.3f}",
+                (seed, value),
+                xytext=(0, 8 if i else -16),
+                textcoords="offset points",
+                ha="center",
+                fontsize=10,
+                color=color,
+            )
+    axes[0].set(
+        xticks=x,
+        xticklabels=methods,
+        xlim=(-0.5, 2.5),
+        ylabel="mAP50:95 (%)",
+        title="Mean +/- sample SD; dots = individual seeds",
+    )
+    axes[1].set(xticks=x, xticklabels=["seed0", "seed1", "seed2"], xlim=(-0.2, 2.2), title="Same-seed comparisons")
+    axes[1].legend(loc="lower left", ncol=3, fontsize=9, frameon=False)
+    for ax in axes:
+        ax.set_ylim(10.35, 11.9)
         ax.grid(axis="y", alpha=0.2)
         ax.set_axisbelow(True)
-        fig.supxlabel(
-            "Mean +/- sample SD of 3 paired differences; dots = seeds. Not confidence intervals.", fontsize=10
+    fig.suptitle("Hard-SRLA exceeds matched random gating in all three seeds", fontsize=15)
+    fig.supxlabel("Detail view: y-axis starts at 10.35%. Validation subset; fixed best-epoch selection.", fontsize=10)
+    save(fig, "control_three_seeds")
+    contrasts = np.array([values[1] - values[0], values[2] - values[1], values[2] - values[0]])
+    gain, spread = contrasts.mean(1), contrasts.std(1, ddof=1)
+    fig, ax = plt.subplots(figsize=(8, 4.8))
+    for i, color in enumerate(["#858B92", "#D97422", "#3274A1"]):
+        ax.bar(i, gain[i], color=color, alpha=0.8, width=0.6)
+        ax.errorbar(i, gain[i], yerr=spread[i], fmt="none", color="#263238", capsize=6, linewidth=1.5)
+        ax.scatter(i + np.array([-0.13, 0, 0.13]), contrasts[i], color="#263238", s=28, zorder=4)
+        ax.text(
+            i,
+            max(gain[i] + spread[i], max(contrasts[i])) + 0.05,
+            f"+{gain[i]:.3f} +/- {spread[i]:.3f}",
+            ha="center",
+            fontsize=11,
+            fontweight="bold",
         )
-        save(fig, "control_paired_gains")
-        control_lines = [
-            "# Updated three-seed mechanism comparison",
-            "",
-            "![Three-seed results](control_three_seeds.png)",
-            "",
-            "![Paired improvements](control_paired_gains.png)",
-            "",
-            "Hard exceeds Matched Random in all three seeds: +0.555 / +0.425 / +0.303 pp.",
-            "Mean paired Hard-Control gain: +0.428 +/- 0.126 pp; Random-Baseline: +0.292 +/- 0.108 pp.",
-            "Error bars are sample SD, not confidence intervals. These contrasts do not establish causal fractions or statistical significance.",
-            "The seed0-only table/figure below is retained as historical context.",
-            "Source: frozen Control summary. Data: three_seed_control.csv.",
-            "",
-            "---",
-            "",
-        ]
+    ax.set(
+        xticks=x,
+        xticklabels=["Random - Baseline", "Hard - Random", "Hard - Baseline"],
+        ylabel="Paired improvement (percentage points)",
+        ylim=(0, 1.03),
+        title=f"Hard minus matched random: +{gain[1]:.3f} +/- {spread[1]:.3f} pp",
+    )
+    ax.grid(axis="y", alpha=0.2)
+    ax.set_axisbelow(True)
+    fig.supxlabel("Mean +/- sample SD of 3 paired differences; dots = seeds. Not confidence intervals.", fontsize=10)
+    save(fig, "control_paired_gains")
+    write_csv(
+        args.out / "paired_control.csv",
+        [
+            {"contrast": label, "seed0_pp": d[0], "seed1_pp": d[1], "seed2_pp": d[2], "mean_pp": g, "sample_sd_pp": sd}
+            for label, d, g, sd in zip(["Matched-Baseline", "Hard-Matched", "Hard-Baseline"], contrasts, gain, spread)
+        ],
+    )
+    control_lines = [
+        "## Matched-Gating Control (seeds 0/1/2)",
+        "",
+        "| Method | mAP50 (%) | mAP50:95 (%) | Last mAP50:95 (%) |",
+        "|---|---:|---:|---:|",
+    ]
+    for method in methods:
+        stats = []
+        for metric in ["map50", "map5095", "last_map5095"]:
+            v = [r[metric] for r in control_rows if r["method"] == method]
+            stats.append(f"{st.mean(v):.3f} +/- {st.stdev(v):.3f}")
+        control_lines.append("| " + method + " | " + " | ".join(stats) + " |")
+    control_lines += [
+        "",
+        f"**Matched-Baseline: +{gain[0]:.3f} +/- {spread[0]:.3f} pp.**",
+        f"**Hard-Matched: +{gain[1]:.3f} +/- {spread[1]:.3f} pp.**",
+        "Hard exceeds Matched in all three seeds: " + " / ".join(f"{v:+.3f}" for v in contrasts[1]) + " pp.",
+        "",
+        "![Three-seed results](control_three_seeds.png)",
+        "",
+        "![Paired improvements](control_paired_gains.png)",
+        "",
+        "Error bars are sample SD, not confidence intervals. These contrasts support selection-specific value relative to this random control; they do not establish causal fractions or statistical significance.",
+        "Control matches GT-anchor candidate sparsity before neighbor expansion (P3/P4/P5 removal targets: 9.08/37.18/59.28%), not size-specific counts or expanded positive cells.",
+        "Selection uses fixed random rules without spectral retention; the training and gating seed is 0/1/2. All 100 epoch candidate-pairing checks passed for each seed.",
+        "Source: frozen Control summary, cross-checked against all nine frozen run CSVs. Data: three_seed_control.csv and paired_control.csv.",
+        "",
+        "## Soft ablation (seed0 only)",
+        "",
+        f"The single pre-fixed Soft rule achieved {soft_result['map5095']:.3f}% mAP50:95 at epoch {soft_result['best_epoch']}; seed0 Hard achieved {values[2, 0]:.3f}%. Soft was stopped without searching alternative functions. This does not rule out all soft rules.",
+        "",
+    ]
 
     lines = [
         "# SRLA final results",
@@ -325,21 +331,9 @@ def main():
         "Accuracy in percent; accuracy deltas in percentage points. Training minutes include initialization, validation and saving.",
         f"Training ratio of mean wall times: {summary[-1]['hard_mean'] / summary[-1]['baseline_mean']:.3f}x.",
         "",
-        "## Seed0 ablations",
-        "",
-        "| Method | mAP50:95 (%) | Best epoch | Purpose |",
-        "|---|---:|---:|---|",
     ]
-    for r, purpose in zip(
-        ablation,
-        ["Anchor-only", "Control for generic pruning", "Main spectral method", "Single fixed soft rule, rejected"],
-    ):
-        lines.append(f"| {r['method']} | {r['map5095']:.3f} | {r['best_epoch']} | {purpose} |")
+    lines += control_lines
     lines += [
-        "",
-        "Hard exceeds Control by +0.555 pp; Control exceeds Baseline by +0.177 pp. One Control seed supports spectral selection beyond generic pruning, but is not statistical proof.",
-        "Control matches GT-anchor candidate sparsity before neighbor expansion, not size-specific counts or expanded positive cells.",
-        "",
         "## Inference efficiency",
         "",
         inf["protocol"],
@@ -372,14 +366,12 @@ def main():
         "Original-pixel small/medium/large GT counts: 13135/6199/994. Large-object AR decreases; effects are mixed.",
         "Input640 uses actual loader scaling: 19013/1287/28 GT. Its large-bin +13.254 pp is supplementary with only 28 GT, not a main conclusion; see size_summary.csv.",
         "",
-        "![Control](mechanism_control.png)",
-        "",
         "## Provenance",
         "",
-        "Hard tag: srla-hard-3seed-final (a2f51f4b). Matched Control: matched-control-seed0-final (b1f037e0). Soft: 6ed85509.",
+        "Hard tag: srla-hard-3seed-final (a2f51f4b). Matched Control: matched-control-seed0-final + matched-control-3seed-extension (b1f037e0), all three seeds. Soft: 6ed85509.",
         "Input hashes: input_sha256.json. Original diagnostics and slow reference remain in experiment archives. No new training or tuning.",
     ]
-    (args.out / "README.md").write_text("\n".join(control_lines + lines) + "\n")
+    (args.out / "README.md").write_text("\n".join(lines) + "\n")
     (args.out / "input_sha256.json").write_text(
         json.dumps({str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}, indent=2)
     )
