@@ -41,7 +41,7 @@ copy_paste: 0.0 # segment copy-paste (probability)
 # Paired baseline: same command and seed, with --hyp data/hyps/hyp.scratch-low.yaml.
 # Scores use mean-centered target/background-strip spectra; flat patches occupy the lowest band.
 # Small/unsupported crops and weak baseline contrast preserve original anchor matching.
-# This reference implementation processes variable-size crops per GT; benchmark training overhead.
+# Native-size padding buckets batch ROI degradation and FFT; benchmark training overhead.
 # Epoch logs report GT-anchor candidate counts before neighbor-cell expansion, aggregated across DDP.
 # Disable with srla: false for the paired baseline run.
 srla: true
