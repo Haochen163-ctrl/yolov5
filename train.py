@@ -84,6 +84,7 @@ from utils.loggers.comet.comet_utils import check_comet_resume
 from utils.loss import ComputeLoss
 from utils.metrics import fitness
 from utils.plots import plot_evolve
+from utils.srla import SRLAAnalyzer
 from utils.torch_utils import (
     EarlyStopping,
     GradScaler,
@@ -345,6 +346,16 @@ def train(hyp, opt, device, callbacks):
     scaler = GradScaler(enabled=amp)
     stopper, stop = EarlyStopping(patience=opt.patience), False
     compute_loss = ComputeLoss(model)  # init loss class
+    srla = None
+    if hyp.get("srla", False):
+        if not 0 <= hyp["srla_thr"] < 1:
+            raise ValueError("srla_thr must satisfy 0 <= srla_thr < 1")
+        srla = SRLAAnalyzer(
+            de_parallel(model).model[-1].stride.tolist(),
+            size=hyp["srla_size"],
+            context=hyp["srla_context"],
+            min_contrast=hyp["srla_min_contrast"],
+        )
     callbacks.run("on_train_start")
     LOGGER.info(
         f"Image sizes {imgsz} train, {imgsz} val\n"
@@ -367,6 +378,8 @@ def train(hyp, opt, device, callbacks):
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
         mloss = torch.zeros(3, device=device)  # mean losses
+        if srla is not None:
+            compute_loss.srla_counts.zero_()
         if RANK != -1:
             train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
@@ -398,10 +411,14 @@ def train(hyp, opt, device, callbacks):
                     ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
                     imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
 
+            retention = srla(imgs, targets) if srla is not None else None
+
             # Forward
             with smart_amp_autocast(amp):
                 pred = model(imgs)  # forward
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                loss, loss_items = compute_loss(
+                    pred, targets.to(device), retention=retention
+                )  # loss scaled by batch_size
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
                 if opt.quad:
@@ -433,6 +450,14 @@ def train(hyp, opt, device, callbacks):
                 if callbacks.stop_training:
                     return
             # end batch ------------------------------------------------------------------------------------------------
+
+        if srla is not None:
+            counts = compute_loss.srla_counts.clone()
+            if RANK != -1:
+                dist.all_reduce(counts)
+            if RANK in {-1, 0}:
+                before, after = counts.cpu().tolist()
+                LOGGER.info(f"SRLA GT-anchor candidates (strides {srla.strides}): {before} -> {after}")
 
         # Scheduler
         lr = [x["lr"] for x in optimizer.param_groups]  # for loggers
