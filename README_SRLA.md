@@ -90,3 +90,7 @@ Training overhead must be reported alongside accuracy, using recorded end-to-end
 
 Only Hard implementation, necessary training/loss integration, configuration, tests and evaluation tools
 belong to the formal code diff. Experimental variants and raw debugging evidence remain archived.
+
+## Three-seed Control charts
+
+Pass --control-summary /path/to/matched-control-3seed-extension/seeds012/summary.json to tools/analyze_srla_final.py. This adds control_three_seeds and control_paired_gains in PNG/PDF, with paired sample SD and individual seed points. The earlier seed0 figures remain explicitly labeled as historical context.
