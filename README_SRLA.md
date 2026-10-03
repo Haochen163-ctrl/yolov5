@@ -49,8 +49,12 @@ Three seeds, mean +/- sample SD (ddof=1), best CSV fitness epoch:
 | Last mAP50:95 (%) | 10.659 +/- 0.070 | 11.360 +/- 0.208 | +0.701 +/- 0.143 pp |
 
 Seed0 Baseline / Matched Random / Hard / Soft mAP50:95: 10.859 / 11.036 / 11.591 / 10.390%.
-The random control matches candidate sparsity, not target-size or expanded-cell counts. Its one-seed
-result supports additional spectral-selection value, but does not establish statistical significance.
+The random control matches candidate sparsity, not target-size or expanded-cell counts.
+The completed three-seed Control reaches 11.034 +/- 0.040% mAP50:95. Hard exceeds it in every seed
+(+0.555 / +0.425 / +0.303 pp), with paired mean +0.428 +/- 0.126 pp; Control exceeds Baseline by
++0.292 +/- 0.108 pp. This supports spectral-selection value beyond random pruning, without a
+statistical-significance claim. Both new seeds passed all 100 epoch candidate-pairing checks and
+the fixed per-level removal-rate tolerance.
 The tested Soft rule failed; this is not a claim about every possible soft rule.
 
 ## Evaluation
@@ -94,3 +98,12 @@ belong to the formal code diff. Experimental variants and raw debugging evidence
 ## Three-seed Control charts
 
 Pass --control-summary /path/to/matched-control-3seed-extension/seeds012/summary.json to tools/analyze_srla_final.py. This adds control_three_seeds and control_paired_gains in PNG/PDF, with paired sample SD and individual seed points. The earlier seed0 figures remain explicitly labeled as historical context.
+
+## Final freeze v2
+
+The authoritative consolidated snapshot is
+runs/srla-final/freeze/srla-final-v2 in the YOLOv5-srla-final-v2 worktree.
+It includes all six Baseline/Hard runs, all three Matched Control runs, the single Soft run,
+assignment evidence, three-seed figures, inference measurements, environments, exact source
+archives and SHA256 manifests. The older v1 and experiment snapshots remain unchanged.
+See its README.md for the final result index. PR publication is a separate next step.
